@@ -1,0 +1,19 @@
+{
+  "name": "botthtruemilk",
+  "version": "1.0.0",
+  "description": "",
+  "main": "botMistori.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "private": true,
+  "dependencies": {
+    "abort-controller": "^3.0.0",
+    "axios": "^1.7.7",
+    "cheerio": "^1.0.0",
+    "dotenv": "^16.4.5",
+    "https-proxy-agent": "^7.0.5",
+    "node-telegram-bot-api": "^0.66.0",
+    "tunnel": "^0.0.6"
+  }
+}
