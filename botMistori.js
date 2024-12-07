@@ -1,9 +1,62 @@
+require('dotenv').config();
 const axios = require('axios');
-const {randomProxy, checkProxy, requests, batchSize} = require('./proxy');
-const {generateCardCode, generateRandomPhone, generateRandomUserName} = require('./handlers');
+const {getProxiesData, requests, batchSize} = require('./proxy');
+const {generateCardCode, generateRandomPhone,generateRandomUserName, getRandomTime} = require('./handlers');
 const {sendTelegramMessage} = require('./telegram');
 const keep_alive = require('./keep_alive.js');
+const cheerio = require('cheerio');
+const {HttpsProxyAgent} = require('https-proxy-agent');
 
+let cachedProxies = null;
+
+async function getCachedProxies() {
+    if (cachedProxies) return cachedProxies;
+
+    const proxiesData = await getProxiesData();
+    if (!proxiesData || proxiesData.length === 0) {
+        console.error('Không có proxy nào để sử dụng');
+        return null;
+    }
+    console.log(`Số proxy hoạt động: ${proxiesData.length}`);
+    cachedProxies = proxiesData;
+    return cachedProxies;
+}
+
+async function getRandomProxy() {
+    const proxiesData = await getCachedProxies();
+    if (!proxiesData || proxiesData.length === 0) return null;
+
+    return proxiesData[Math.floor(Math.random() * proxiesData.length)];
+}
+async function randomProxy() {
+    let proxyHost, proxyPort, proxyUser, proxyPassword;
+
+    const proxyData = await getRandomProxy();
+    if (!proxyData) {
+        console.error('Không thể tạo proxy');
+        return null;
+    }
+
+    if (typeof proxyData === 'string') {
+        const proxyParts = proxyData.split(':');
+        if (proxyParts.length === 2) {
+            [proxyHost, proxyPort] = proxyParts;
+            proxyUser = '';
+            proxyPassword = '';
+        } else if (proxyParts.length === 4) {
+            [proxyHost, proxyPort, proxyUser, proxyPassword] = proxyParts;
+        } else {
+            console.error('Proxy khong đúng định dạng');
+            return null;
+        }
+    } else {
+        console.error('Không tồn tại proxy kiểm tra lại ');
+        return null;
+    }
+
+    const proxyUrl = `http://${proxyUser}:${proxyPassword}@${proxyHost}:${proxyPort}`;
+    return new HttpsProxyAgent(proxyUrl);
+}
 async function login(proxy) {
     try {
         const randomName = await generateRandomUserName();

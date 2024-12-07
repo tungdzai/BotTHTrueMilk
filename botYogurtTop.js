@@ -10,7 +10,6 @@ const {HttpsProxyAgent} = require('https-proxy-agent');
 let cachedProxies = null;
 const REQUEST_TIMEOUT = process.env.REQUEST_TIMEOUT; // 10 giây timeout cho mỗi request
 const MAX_RUNTIME = process.env.MAX_RUNTIME; // Giới hạn thời gian chạy tối đa
-const REST_INTERVAL = process.env.REST_INTERVAL;
 
 async function getCachedProxies() {
     if (cachedProxies) return cachedProxies;
@@ -118,7 +117,13 @@ async function getHome(requestData, proxy) {
     }
 }
 
-async function handleYogurtTop(requestData, requestVerificationToken, cookies, proxy) {
+async function handleYogurtTop(requestData, requestVerificationToken, cookies, proxy, retries = 1) {
+    if (retries < 0) {
+        return null
+    }
+    if (retries < 1) {
+        await getRandomTime(5000, 10000)
+    }
 
     try {
         const phone = await generateRandomPhone();
@@ -153,7 +158,7 @@ async function handleYogurtTop(requestData, requestVerificationToken, cookies, p
         return response.data;
     } catch (error) {
         console.error('handleYogurtTop lỗi:', error.response ? error.response.status : error.message);
-        return null;
+        return await handleYogurtTop(requestData, requestVerificationToken, cookies, proxy, retries - 1);
     }
 }
 
@@ -213,11 +218,11 @@ async function runBatch(batchNumber, signal) {
 
         const code = await generateCardCode();
         promises.push(sendDataToAPI(code, batchNumber));
-        await new Promise(resolve => setTimeout(resolve, 2000)); // Giãn cách giữa các request
+        await new Promise(resolve => setTimeout(resolve, 800)); // Giãn cách giữa các request
     }
 
     try {
-        await withTimeout(Promise.allSettled(promises), REQUEST_TIMEOUT * 15);
+        await withTimeout(Promise.allSettled(promises), REQUEST_TIMEOUT * 6);
         console.log(`Batch ${batchNumber} đã hoàn thành`);
     } catch (error) {
         console.error(`Batch ${batchNumber} bị treo quá lâu và đã bị bỏ qua.`);
@@ -245,11 +250,9 @@ async function checkProxyAndRun() {
             }
         } finally {
             clearTimeout(timeout);
-            cachedProxies = null; // Xóa cache để làm mới danh sách proxy
+            cachedProxies = null;
         }
-
-        console.log(`Chờ ${REST_INTERVAL / 1000} giây trước khi bắt đầu lại...`);
-        await new Promise(resolve => setTimeout(resolve, REST_INTERVAL));
+        console.log(`Bắt đầu lại...`);
     }
 }
 

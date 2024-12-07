@@ -47,4 +47,4 @@ async function getProxiesWw() {
     return cachedProxies;
 }
 
-module.exports = { getProxiesWw };
+module.exports = {getProxiesWw};

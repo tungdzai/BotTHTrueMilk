@@ -1,17 +1,9 @@
 const axios = require('axios');
-const {sendTelegramMessage} = require('./telegram');
+const { sendTelegramMessage } = require('./telegram');
 const keep_alive = require('./keep_alive.js');
-const {getRandomTime} = require("./handlers");
-
 let previousData = {};
 
-async function numberPrize(requestData, reties = 5) {
-    if (reties < 0) {
-        return null
-    }
-    if (reties < 5) {
-        await getRandomTime(1000, 5000)
-    }
+async function numberPrize(requestData) {
     try {
         const response = await axios.get(`${requestData.referer}home/NumberPrize`, {
             headers: {
@@ -32,32 +24,53 @@ async function numberPrize(requestData, reties = 5) {
                 'priority': 'u=1'
             }
         });
-        return response.data;
-
+        if (!response.data) {
+            console.log("Không nhận được dữ liệu từ API");
+            return null;
+        }
+        try {
+            const data = JSON.parse(response.data);
+            return {
+                "Toltal_Laptop": data.Toltal_Laptop,
+                "Toltal_Xedap": data.Toltal_Xedap,
+                "Toltal_20k": data.Toltal_20k,
+                "Toltal_10k": data.Toltal_10k,
+                "Toltal_TaiNghe": data.Toltal_TaiNghe,
+                "Toltal_MayQuay": data.Toltal_MayQuay,
+                "Toltal_Topup": data.Toltal_Topup
+            };
+        } catch (error) {
+            console.error("Lỗi parsing dữ liệu", error);
+            return null;
+        }
     } catch (error) {
         console.error("Lỗi get phone", error);
+        return null;
     }
 }
 
-function checkForChanges(newData, url) {
-    const previous = previousData[url];
-    if (previous) {
-        for (const key in newData) {
-            if (newData[key] !== previous[key]) {
-                return true;
+function checkForChanges(newData, previous) {
+    const changes = {};
+    for (const key in newData) {
+        if (previous[key] !== undefined) {
+            const change = previous[key] - newData[key]; // Lấy số trước trừ số sau
+            if (change !== 0) {
+                changes[key] = change; // Lưu thay đổi (chỉ lưu nếu có sự khác biệt)
             }
         }
     }
-    return false;
+    return changes;
 }
 
 async function main() {
     const listData = [
         {
+            name: 'Top Kid',
             host: 'quatangtopkid.thmilk.vn',
             referer: 'https://quatangtopkid.thmilk.vn/'
         },
         {
+            name: 'Yogurt',
             host: 'quatangyogurt.thmilk.vn',
             referer: 'https://quatangyogurt.thmilk.vn/'
         }
@@ -66,12 +79,32 @@ async function main() {
     for (const data of listData) {
         const result = await numberPrize(data);
         console.log(result);
-        if (checkForChanges(result, data.referer)) {
-            await sendTelegramMessage(`Quà ${data.referer} tụt rồi:bú thôi ô cháu ${result} !`);
+
+        if (result) {
+            const previous = previousData[data.referer] || {};
+            const changes = checkForChanges(result, previous);
+
+            if (Object.keys(changes).length > 0) {
+                let message = `Quà ${data.name} đã thay đổi:\n`;
+
+                for (const key in changes) {
+                    const change = changes[key];
+                    if (change > 0) {
+                        message += `${key}: giảm ${change} (Trước: ${previous[key]}, Hiện tại: ${result[key]})\n`;
+                    } else {
+                        message += `${key}: tăng ${Math.abs(change)} (Trước: ${previous[key]}, Hiện tại: ${result[key]})\n`;
+                    }
+                }
+
+                if (message.trim() !== `Quà ${data.name} đã thay đổi:\n`) {
+                    await sendTelegramMessage(message);
+                }
+            }
+
+            previousData[data.referer] = result; // Cập nhật dữ liệu cũ
         }
-        previousData[data.referer] = result;
     }
 }
 
-main()
-setInterval(main, 3 * 60 * 1000);
+main();
+setInterval(main, 60 * 1000);
