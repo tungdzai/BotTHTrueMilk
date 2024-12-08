@@ -1,9 +1,8 @@
 require('dotenv').config();
+const fs = require('fs');
 const axios = require('axios');
 const {getProxiesData, requests, batchSize} = require('./proxy');
 const {generateCardCode, generateRandomPhone, getRandomTime} = require('./handlers');
-const {sendTelegramMessage} = require('./telegram');
-const keep_alive = require('./keep_alive.js');
 const cheerio = require('cheerio');
 const {HttpsProxyAgent} = require('https-proxy-agent');
 
@@ -24,24 +23,22 @@ async function getCachedProxies() {
     return cachedProxies;
 }
 
-async function getRandomProxy() {
+async function getProxyGroups() {
     const proxiesData = await getCachedProxies();
-    if (!proxiesData || proxiesData.length === 0) return null;
+    if (!proxiesData || proxiesData.length === 0) return [];
 
-    return proxiesData[Math.floor(Math.random() * proxiesData.length)];
+    const groupSize = 25; // Mỗi nhóm gồm 25  proxy
+    const proxyGroups = [];
+    for (let i = 0; i < proxiesData.length; i += groupSize) {
+        proxyGroups.push(proxiesData.slice(i, i + groupSize));
+    }
+    return proxyGroups;
 }
-
-async function randomProxy() {
+async function httpsProxyAgent(proxy) {
     let proxyHost, proxyPort, proxyUser, proxyPassword;
 
-    const proxyData = await getRandomProxy();
-    if (!proxyData) {
-        console.error('Không thể tạo proxy');
-        return null;
-    }
-
-    if (typeof proxyData === 'string') {
-        const proxyParts = proxyData.split(':');
+    if (typeof proxy === 'string') {
+        const proxyParts = proxy.split(':');
         if (proxyParts.length === 2) {
             [proxyHost, proxyPort] = proxyParts;
             proxyUser = '';
@@ -60,7 +57,6 @@ async function randomProxy() {
     const proxyUrl = `http://${proxyUser}:${proxyPassword}@${proxyHost}:${proxyPort}`;
     return new HttpsProxyAgent(proxyUrl);
 }
-
 async function withTimeout(promise, timeout) {
     return Promise.race([
         promise,
@@ -70,7 +66,7 @@ async function withTimeout(promise, timeout) {
     ]);
 }
 
-async function getHome(requestData, proxy) {
+async function getHome(requestData, agent) {
     try {
         const response = await withTimeout(
             await axios.get(requestData.origin, {
@@ -93,8 +89,8 @@ async function getHome(requestData, proxy) {
                     'priority': 'u=1',
                 },
                 withCredentials: true,
-                httpAgent: proxy,
-                httpsAgent: proxy
+                httpAgent: agent,
+                httpsAgent: agent
             }),
             REQUEST_TIMEOUT
         );
@@ -117,12 +113,9 @@ async function getHome(requestData, proxy) {
     }
 }
 
-async function handleYogurtTop(requestData, requestVerificationToken, cookies, proxy, retries = 1) {
+async function handleYogurtTop(requestData, requestVerificationToken, cookies, agent, retries = 2) {
     if (retries < 0) {
         return null
-    }
-    if (retries < 1) {
-        await getRandomTime(5000, 10000)
     }
 
     try {
@@ -150,19 +143,34 @@ async function handleYogurtTop(requestData, requestVerificationToken, cookies, p
                     'priority': 'u=1',
                     'Cookie': cookies,
                 },
-                httpAgent: proxy,
-                httpsAgent: proxy
+                httpAgent: agent,
+                httpsAgent: agent
             }),
             REQUEST_TIMEOUT
         );
         return response.data;
     } catch (error) {
+        if (error.response && error.response.status === 429) {
+            console.warn('Quá nhiều request, chờ trước khi retry...');
+
+            let delay;
+            if (retries === 2) {
+                delay = 1000; // 2s
+            } else if (retries === 1) {
+                delay = 2000; // 3s
+            } else {
+                delay = 3000; // 4s
+            }
+
+            await new Promise(resolve => setTimeout(resolve, delay));
+            return await handleYogurtTop(requestData, requestVerificationToken, cookies, agent, retries - 1);
+        }
         console.error('handleYogurtTop lỗi:', error.response ? error.response.status : error.message);
-        return await handleYogurtTop(requestData, requestVerificationToken, cookies, proxy, retries - 1);
+        return null;
     }
 }
 
-async function sendDataToAPI(code, batchNumber) {
+async function sendDataToAPI(code, batchNumber,proxy) {
     try {
         const dataList = [
             {
@@ -181,25 +189,25 @@ async function sendDataToAPI(code, batchNumber) {
             }
         ];
         for (const requestData of dataList) {
-            const proxy = await randomProxy();
-            if (proxy) {
-                const homeResult = await getHome(requestData, proxy);
+            const agent = await httpsProxyAgent(proxy);
+            if (agent) {
+                const homeResult = await getHome(requestData, agent);
                 if (!homeResult) {
-                    console.error('Không lấy được token và cookies  từ getHome');
+                    console.error('Không lấy được token và cookies từ getHome');
                     return null;
                 }
                 const {requestVerificationToken, cookies} = homeResult;
-                const response = await handleYogurtTop(requestData, requestVerificationToken, cookies, proxy);
+                const response = await handleYogurtTop(requestData, requestVerificationToken, cookies, agent);
                 if (response !== null) {
                     const status = response.Type;
                     const message = response.Message;
                     if (status !== 'error') {
-                        const messageText = `${requestData.gift}`;
-                        await sendTelegramMessage(messageText);
+                        // Ghi mã vào file data.txt
+                        fs.appendFileSync('data.txt', `${requestData.gift}\n`, 'utf8');
+                        console.log(`Đã ghi mã ${requestData.gift} vào file data.txt`);
                     }
-                    console.log(`[Batch ${batchNumber}] ${proxy.proxy.hostname} ${requestData.gift} ${message}`);
+                    console.log(`[Batch ${batchNumber}] ${agent.proxy.hostname} ${requestData.gift} ${message}`);
                 }
-
             }
         }
     } catch (error) {
@@ -208,25 +216,46 @@ async function sendDataToAPI(code, batchNumber) {
     }
 }
 
-async function runBatch(batchNumber, signal) {
+async function runBatch(batchNumber, proxyGroup, signal) {
     const promises = [];
+    let proxyIndex = 0; // Bắt đầu từ proxy đầu tiên
+
     for (let i = 0; i < batchSize; i++) {
         if (signal.aborted) {
             console.warn(`Batch ${batchNumber} bị hủy do quá thời gian.`);
-            break;
+            return;
         }
 
-        const code = await generateCardCode();
-        promises.push(sendDataToAPI(code, batchNumber));
-        await new Promise(resolve => setTimeout(resolve, 800)); // Giãn cách giữa các request
+        const code = await generateCardCode(); // Tạo mã code
+        const proxy = proxyGroup[proxyIndex]; // Chọn proxy hiện tại
+        proxyIndex = (proxyIndex + 1) % proxyGroup.length; // Chuyển sang proxy tiếp theo (vòng lặp lại nếu hết nhóm proxy)
+
+        // Thêm promise xử lý request
+        promises.push(sendDataToAPI(code, batchNumber, proxy));
+
+        // Giãn cách thời gian giữa các request
+        await new Promise(resolve => setTimeout(resolve, 500));
     }
 
     try {
+        // Chờ tất cả các request hoàn thành hoặc timeout
         await withTimeout(Promise.allSettled(promises), REQUEST_TIMEOUT * 6);
         console.log(`Batch ${batchNumber} đã hoàn thành`);
     } catch (error) {
         console.error(`Batch ${batchNumber} bị treo quá lâu và đã bị bỏ qua.`);
     }
+}
+
+async function runIndependentRequests(requests, signal, proxyGroups) {
+    const batchPromises = [];
+
+    for (let i = 0; i < requests; i++) {
+        if (signal.aborted) throw new Error('AbortError');
+        const proxyGroup = proxyGroups[i]; // Nhóm proxy tương ứng với luồng
+        batchPromises.push(runBatch(i + 1, proxyGroup, signal));
+    }
+
+    await Promise.allSettled(batchPromises);
 }
 
 async function checkProxyAndRun() {
@@ -240,8 +269,15 @@ async function checkProxyAndRun() {
         }, MAX_RUNTIME);
 
         try {
-            await getCachedProxies();
-            await runIndependentRequests(requests, batchSize, signal);
+            const proxyGroups = await getProxyGroups();
+            if (proxyGroups.length === 0) {
+                console.error('Không có proxy nào khả dụng.');
+                break;
+            }
+
+            console.log(`Tìm thấy ${proxyGroups.length} nhóm proxy.`);
+            const requests = proxyGroups.length; // Số lượng luồng = số nhóm proxy
+            await runIndependentRequests(requests, signal, proxyGroups);
         } catch (error) {
             if (error.name === 'AbortError') {
                 console.warn('Phiên làm việc đã bị hủy do vượt quá thời gian cho phép.');
@@ -256,16 +292,5 @@ async function checkProxyAndRun() {
     }
 }
 
-async function runIndependentRequests(requests, batchSize, signal) {
-    const batches = Math.ceil(requests / batchSize);
-    const batchPromises = [];
-
-    for (let i = 0; i < batches; i++) {
-        if (signal.aborted) throw new Error('AbortError');
-        batchPromises.push(runBatch(i + 1, signal));
-    }
-
-    await Promise.allSettled(batchPromises);
-}
 
 checkProxyAndRun();
